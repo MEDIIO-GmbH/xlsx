@@ -1,0 +1,67 @@
+name: Sync from SheetJS CDN
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch latest SheetJS tarball
+        run: |
+          curl -fsSL -o latest.tgz https://cdn.sheetjs.com/xlsx-latest/xlsx-latest.tgz
+          tar -xzf latest.tgz        # Entpackt nach ./package/
+
+      - name: Determine versions
+        id: v
+        run: |
+          CURRENT=$(jq -r .version package.json 2>/dev/null || echo "none")
+          LATEST=$(jq -r .version package/package.json)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST"  >> "$GITHUB_OUTPUT"
+          echo "Current: $CURRENT — Latest: $LATEST"
+
+      - name: Skip if already up to date
+        if: steps.v.outputs.current == steps.v.outputs.latest
+        run: echo "Mirror bereits auf ${{ steps.v.outputs.latest }}. Nichts zu tun." && exit 0
+
+      - name: Replace working tree with upstream contents
+        if: steps.v.outputs.current != steps.v.outputs.latest
+        run: |
+          # Alles löschen außer .git/, .github/ (unser Workflow), README.md
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            ! -name 'README.md' \
+            -exec rm -rf {} +
+          cp -a package/. .
+          rm -rf package latest.tgz
+
+      - name: Commit, tag, push
+        if: steps.v.outputs.current != steps.v.outputs.latest
+        env:
+          TAG: v${{ steps.v.outputs.latest }}
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "Mirror xlsx@${{ steps.v.outputs.latest }} from SheetJS CDN"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG existiert bereits — überspringe Tagging."
+          else
+            git tag -a "$TAG" -m "xlsx@${{ steps.v.outputs.latest }}"
+          fi
+          git push origin main --follow-tags
